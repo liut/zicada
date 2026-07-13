@@ -17,7 +17,7 @@ pub fn parseIPv4(s: []const u8) IpError!std.Io.net.Ip4Address {
     return std.Io.net.Ip4Address.parse(s, 0) catch return error.InvalidIp;
 }
 
-pub fn formatA(allocator: std.mem.Allocator, name: []const u8, ttl: u32, ip: std.Io.net.Ip4Address) std.fmt.AllocPrintError![]u8 {
+pub fn formatA(allocator: std.mem.Allocator, name: []const u8, ttl: u32, ip: std.Io.net.Ip4Address) std.mem.Allocator.Error![]u8 {
     const trimmed = trimDot(name);
     return std.fmt.allocPrint(allocator, "{s}. {d} IN A {d}.{d}.{d}.{d}", .{
         trimmed,

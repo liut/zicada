@@ -1,6 +1,13 @@
 const std = @import("std");
 
 const config = @import("config.zig");
+const redis = @import("redis.zig");
+const util = @import("util.zig");
+comptime {
+    _ = config;
+    _ = redis;
+    _ = util;
+}
 
 const usage =
     \\Usage:

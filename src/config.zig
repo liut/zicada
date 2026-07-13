@@ -48,6 +48,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) ParseErro
         .serv = Defaults.serv,
         .net = try allocator.dupe(u8, Defaults.net),
     };
+    errdefer cfg.deinit(allocator);
 
     var i: usize = 1; // skip argv[0]
     while (i < args.len) : (i += 1) {
