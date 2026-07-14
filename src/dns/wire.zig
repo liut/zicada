@@ -79,14 +79,38 @@ pub const Answer = struct {
     rdata: []const u8,
 };
 
+/// Resource Record used for arbitrary sections (prerequisite, update,
+/// additional). Owned by the caller; `deinitRR` frees name + rdata slices.
+pub const RR = struct {
+    name: []u8,
+    rrtype: u16,
+    rrclass: u16,
+    ttl: u32,
+    rdata: []u8,
+
+    pub fn deinit(self: RR, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.rdata);
+    }
+};
+
+pub fn deinitRRs(allocator: std.mem.Allocator, rrs: []RR) void {
+    for (rrs) |rr| rr.deinit(allocator);
+    allocator.free(rrs);
+}
+
 pub const Message = struct {
     header: Header,
     question: ?Question = null,
     answer: ?Answer = null,
+    /// RFC 2136 update section (RRs to add/delete). Omitted for non-UPDATE
+    /// messages. Always empty/free when the section count was zero.
+    update_section: ?[]RR = null,
 
     pub fn deinit(self: Message, allocator: std.mem.Allocator) void {
         if (self.question) |q| allocator.free(q.name);
         if (self.answer) |a| allocator.free(a.name);
+        if (self.update_section) |rrs| deinitRRs(allocator, rrs);
     }
 };
 
@@ -157,6 +181,62 @@ pub fn decodeName(buf: []const u8, start: usize, allocator: std.mem.Allocator) !
     return .{ .name = try name.toOwnedSlice(allocator), .next_offset = pos };
 }
 
+/// Decode one RR (`name | type | class | TTL | rdlength | rdata`) starting at
+/// `start`. Returns the RR and the offset of the next byte after it.
+/// `rdata` bytes are copied out of `buf` so the caller can free them
+/// independently; the wire encoder does not inspect RDATA on responses, but
+/// the UPDATE handler does (it parses A rdata into IPv4 bytes).
+pub fn decodeRR(buf: []const u8, start: usize, allocator: std.mem.Allocator) !struct { rr: RR, next_offset: usize } {
+    const name_result = try decodeName(buf, start, allocator);
+    errdefer allocator.free(name_result.name);
+
+    const body_offset = name_result.next_offset;
+    if (body_offset + 10 > buf.len) return error.BufferTooSmall;
+    const rrtype = std.mem.readInt(u16, buf[body_offset..][0..2], .big);
+    const rrclass = std.mem.readInt(u16, buf[body_offset + 2..][0..2], .big);
+    const ttl = std.mem.readInt(u32, buf[body_offset + 4..][0..4], .big);
+    const rdlen = std.mem.readInt(u16, buf[body_offset + 8..][0..2], .big);
+    const rdata_start = body_offset + 10;
+    if (rdata_start + rdlen > buf.len) return error.BufferTooSmall;
+    const rdata = try allocator.dupe(u8, buf[rdata_start..][0..rdlen]);
+    return .{
+        .rr = .{
+            .name = name_result.name,
+            .rrtype = rrtype,
+            .rrclass = rrclass,
+            .ttl = ttl,
+            .rdata = rdata,
+        },
+        .next_offset = rdata_start + rdlen,
+    };
+}
+
+fn skipRRs(buf: []const u8, start: usize, count: u16) !usize {
+    var pos: usize = start;
+    var i: u16 = 0;
+    while (i < count) : (i += 1) {
+        var p = pos;
+        while (p < buf.len) : (p += 1) {
+            const len = buf[p];
+            if (len == 0) {
+                p += 1;
+                break;
+            }
+            if ((len & 0xC0) == 0xC0) return error.UnsupportedCompression;
+            if ((len & 0xC0) != 0) return error.InvalidName;
+            if (len > 63) return error.InvalidName;
+            if (p + 1 + @as(usize, len) > buf.len) return error.BufferTooSmall;
+            p += 1 + @as(usize, len);
+        }
+        if (p + 10 > buf.len) return error.BufferTooSmall;
+        const rdlen = std.mem.readInt(u16, buf[p + 8..][0..2], .big);
+        const next = p + 10 + rdlen;
+        if (next > buf.len) return error.BufferTooSmall;
+        pos = next;
+    }
+    return pos;
+}
+
 /// Encode a full DNS message. Answer names are emitted as a `0xC0 0x0C`
 /// back-pointer to offset 12 (start of the question section), which is
 /// correct for v1 because responses always echo the single question.
@@ -219,6 +299,59 @@ pub fn decodeQuery(buf: []const u8, allocator: std.mem.Allocator) !Message {
             .qclass = qclass,
         },
         .answer = null,
+    };
+}
+
+/// Decode an RFC 2136 UPDATE message. The zone section arrives in the question
+/// slot (RFC 2136 §3.1); prerequisite and additional sections are walked but
+/// their RRs are dropped (the v1 server ignores them per its scope). The
+/// update section is returned in `update_section`. Returns `MalformedHeader`
+/// if QR≠0, OPCODE≠5, or any count is structurally impossible. Caller must
+/// `deinit` the returned message to free owned buffers.
+pub fn decodeUpdate(buf: []const u8, allocator: std.mem.Allocator) !Message {
+    const header = try Header.decode(buf);
+    if (header.flags.qr != 0) return error.InvalidQueryHeader;
+    if (header.flags.opcode != 5) return error.MalformedHeader;
+
+    const zone_q = try decodeName(buf, 12, allocator);
+    errdefer allocator.free(zone_q.name);
+    if (zone_q.name.len == 0) return error.InvalidName;
+    const body_offset = zone_q.next_offset;
+    if (body_offset + 4 > buf.len) return error.BufferTooSmall;
+    const zone_qtype = std.mem.readInt(u16, buf[body_offset..][0..2], .big);
+    const zone_qclass = std.mem.readInt(u16, buf[body_offset + 2..][0..2], .big);
+
+    var pos = body_offset + 4;
+
+    // Skip the prerequisite section (PRCOUNT RRs).
+    pos = try skipRRs(buf, pos, header.ancount);
+
+    // Parse the update section (UPCOUNT RRs).
+    var rrs: std.ArrayList(RR) = .empty;
+    errdefer {
+        for (rrs.items) |rr| rr.deinit(allocator);
+        rrs.deinit(allocator);
+    }
+    var up: u16 = 0;
+    while (up < header.nscount) : (up += 1) {
+        const result = try decodeRR(buf, pos, allocator);
+        pos = result.next_offset;
+        try rrs.append(allocator, result.rr);
+    }
+
+    // Skip the additional section (ARCOUNT RRs) — its bounds are validated
+    // by skipRRs even though we don't keep the records.
+    pos = try skipRRs(buf, pos, header.arcount);
+
+    return .{
+        .header = header,
+        .question = .{
+            .name = zone_q.name,
+            .qtype = zone_qtype,
+            .qclass = zone_qclass,
+        },
+        .answer = null,
+        .update_section = if (rrs.items.len > 0) try rrs.toOwnedSlice(allocator) else null,
     };
 }
 

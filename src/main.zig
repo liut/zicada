@@ -11,6 +11,7 @@ comptime {
     _ = util;
     _ = wire;
     _ = dns_server;
+    _ = @import("dns/update.zig");
 }
 
 const usage =

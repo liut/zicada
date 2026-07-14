@@ -2,6 +2,7 @@ const std = @import("std");
 const redis = @import("../redis.zig");
 const util = @import("../util.zig");
 const wire = @import("wire.zig");
+const update = @import("update.zig");
 
 const Io = std.Io;
 
@@ -81,7 +82,7 @@ fn handleDatagram(
 
     switch (query.header.flags.opcode) {
         0, 4 => handleQuery(io, socket, client, recv, send_buf, &query, allocator),
-        5 => handleUpdateStub(io, socket, recv, send_buf, &query),
+        5 => update.handle(io, socket, recv, send_buf, recv.data, client, allocator),
         else => {},
     }
 }
