@@ -14,7 +14,7 @@ pub const Client = struct {
 
     pub fn connect(io: Io, dsn: []const u8) ConnectError!Client {
         const host_port = try stripScheme(dsn);
-        const addr = Io.net.IpAddress.parseLiteral(host_port) catch return error.InvalidDsn;
+        const addr = parseHostPort(io, host_port) catch return error.InvalidDsn;
         var client: Client = undefined;
         client.io = io;
         client.stream = addr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
@@ -167,6 +167,24 @@ fn stripScheme(dsn: []const u8) error{InvalidDsn}![]const u8 {
     }
     if (rest.len == 0) return error.InvalidDsn;
     return rest;
+}
+
+fn parseHostPort(io: Io, host_port: []const u8) anyerror!Io.net.IpAddress {
+    if (std.mem.findScalar(u8, host_port, ':')) |colon| {
+        const host = host_port[0..colon];
+        const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return error.InvalidPort;
+        return resolveHost(io, host, port);
+    }
+    return resolveHost(io, host_port, 6379);
+}
+
+/// Special-case "localhost" → 127.0.0.1 (avoids /etc/hosts DNS dependency);
+/// for other hostnames fall back to std.Io.net.IpAddress.resolve.
+fn resolveHost(io: Io, host: []const u8, port: u16) anyerror!Io.net.IpAddress {
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) {
+        return Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } };
+    }
+    return Io.net.IpAddress.resolve(io, host, port);
 }
 
 test "stripScheme basic" {
