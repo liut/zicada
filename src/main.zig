@@ -3,10 +3,12 @@ const std = @import("std");
 const config = @import("config.zig");
 const redis = @import("redis.zig");
 const util = @import("util.zig");
+const wire = @import("dns/wire.zig");
 comptime {
     _ = config;
     _ = redis;
     _ = util;
+    _ = wire;
 }
 
 const usage =
