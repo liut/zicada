@@ -4,11 +4,13 @@ const config = @import("config.zig");
 const redis = @import("redis.zig");
 const util = @import("util.zig");
 const wire = @import("dns/wire.zig");
+const dns_server = @import("dns/server.zig");
 comptime {
     _ = config;
     _ = redis;
     _ = util;
     _ = wire;
+    _ = dns_server;
 }
 
 const usage =
