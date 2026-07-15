@@ -8,7 +8,10 @@ const Io = std.Io;
 
 /// Maximum DNS UDP datagram size (RFC 1035 §4.2.1).
 pub const MAX_DATAGRAM: usize = 512;
-const RECV_TIMEOUT_NS: u64 = 5 * std.time.ns_per_s;
+/// Idle wake period between receives; also the upper bound on how long
+/// it takes `runServer` to notice a shutdown flag flip (kept short so
+/// SIGINT/SIGTERM in main.zig observes within ~1s).
+pub const RECV_TIMEOUT_NS: u64 = 500 * std.time.ns_per_ms;
 
 /// Block on the configured UDP port and dispatch each datagram until `shutdown`
 /// is set. `dsn` is the Redis URL used to answer A queries. The loop polls

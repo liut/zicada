@@ -6,6 +6,7 @@ const util = @import("util.zig");
 const wire = @import("dns/wire.zig");
 const dns_server = @import("dns/server.zig");
 const http_server = @import("http/server.zig");
+const log = @import("log.zig");
 comptime {
     _ = config;
     _ = redis;
@@ -13,8 +14,11 @@ comptime {
     _ = wire;
     _ = dns_server;
     _ = http_server;
+    _ = log;
     _ = @import("dns/update.zig");
 }
+
+const VERSION: []const u8 = "0.1.0";
 
 const usage =
     \\Usage:
@@ -33,6 +37,27 @@ const usage =
 ;
 
 const Io = std.Io;
+
+/// Flipped by the SIGINT/SIGTERM handler. Held in module scope because a
+/// signal handler cannot safely access function-scoped Zig state. Stores
+/// are atomic; loads are atomic; this is async-signal-safe.
+var g_shutdown: std.atomic.Value(bool) = .init(false);
+
+fn handleSignal(sig: std.posix.SIG) callconv(.c) void {
+    _ = sig;
+    g_shutdown.store(true, .monotonic);
+}
+
+fn installSignalHandlers() void {
+    var act: std.posix.Sigaction = .{
+        .handler = .{ .handler = handleSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+    std.posix.sigaction(std.posix.SIG.HUP, &act, null);
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const arena: std.mem.Allocator = init.arena.allocator();
@@ -122,11 +147,59 @@ fn runCliAdd(io: Io, cfg: *const config.Config) !u8 {
     return 0;
 }
 
+/// Run DNS (UDP, port) and HTTP (TCP, port+1) servers concurrently. Blocks
+/// until SIGINT/SIGTERM/SIGHUP, then drains the DNS thread (which polls
+/// shutdown via `receiveTimeout`) and detaches the HTTP thread (whose
+/// `listener.accept` is uncancellable). Exits within ~1s of the signal.
 fn runServer(io: Io, cfg: *const config.Config) !u8 {
-    var stderr_buffer: [128]u8 = undefined;
-    var stderr_file_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr_writer = &stderr_file_writer.interface;
-    try stderr_writer.print("server not implemented (port={d})\n", .{cfg.port});
-    try stderr_writer.flush();
-    return 1;
+    installSignalHandlers();
+
+    var port_buf: [16]u8 = undefined;
+    const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{cfg.port}) catch "?";
+
+    var stdout_buf: [512]u8 = undefined;
+    log.event(io, &stdout_buf, .info, "main", "starting", &[_]log.Field{
+        .{ .key = "ver", .value = VERSION },
+        .{ .key = "net", .value = "udp" },
+        .{ .key = "port", .value = port_str },
+        .{ .key = "dns_http_port", .value = "port+1" },
+    });
+
+    // Per-invocation shutdown flag, passed by pointer to both servers.
+    g_shutdown.store(false, .monotonic);
+
+    const dns_thread = try std.Thread.spawn(.{}, dns_server.runServer, .{
+        io, cfg.port, cfg.dsn, &g_shutdown,
+    });
+    errdefer {
+        g_shutdown.store(true, .monotonic);
+        dns_thread.join();
+    }
+
+    const http_thread = try std.Thread.spawn(.{}, http_server.runServer, .{
+        io, cfg.port, cfg.dsn, &g_shutdown,
+    });
+    errdefer {
+        g_shutdown.store(true, .monotonic);
+        http_thread.detach();
+        dns_thread.join();
+    }
+
+    while (!g_shutdown.load(.monotonic)) {
+        try Io.Clock.Duration.sleep(.{
+            .raw = .{ .nanoseconds = std.time.ns_per_ms * 100 },
+            .clock = .real,
+        }, io);
+    }
+
+    log.event(io, &stdout_buf, .info, "main", "shutdown received", &.{});
+
+    // DNS polls the flag via receiveTimeout (sub-second cadence), so a
+    // bounded join is enough. HTTP's accept() blocks forever though —
+    // detach it so the process can exit cleanly.
+    dns_thread.join();
+    http_thread.detach();
+
+    log.event(io, &stdout_buf, .info, "main", "shutdown complete", &.{});
+    return 0;
 }
