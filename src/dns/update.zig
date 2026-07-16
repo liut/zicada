@@ -38,6 +38,7 @@ pub fn handle(
     allocator: std.mem.Allocator,
 ) void {
     var msg = wire.decodeUpdate(raw, allocator) catch |err| {
+        std.log.warn("update decode failed: {s}", .{@errorName(err)});
         const rcode: wire.Rcode = switch (err) {
             error.InvalidQueryHeader,
             error.MalformedHeader,
