@@ -4,7 +4,7 @@ A small DNS server backed by Redis. Stores A records in a `dns-a-<name>` key
 (zone-text value), answers A queries over UDP, accepts RFC 2136 UPDATE messages
 over UDP, and exposes a tiny HTTP `PUT /api/dns/a` API for batch inserts.
 
-Zig 0.16 rewrite of an internal Go service (`cupola/cicada`). Scope is
+Zig 0.16 rewrite of an internal Go service [cicada](https://github.com/liut/cicada). Scope is
 intentionally narrow: A records only, UDP only, no TSIG, no zone transfers, no
 DNSSEC.
 
