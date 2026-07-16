@@ -20,8 +20,11 @@ TTL=60
 LOG=/tmp/zicada-smoke.log
 
 # Tool preflight: each AE relies on one of these, so a missing tool needs
-# to fail loudly at the top, not halfway through AE4.
-for tool in zig redis-cli redis-server dig curl python3 nc; do
+# to fail loudly at the top, not halfway through AE4. `redis-server` is
+# intentionally NOT in this list — the smoke only invokes it when no
+# Redis is reachable, which never happens in CI (where the service
+# container is already up). It's checked lazily just before spawn.
+for tool in zig redis-cli dig curl python3 nc; do
     command -v "$tool" >/dev/null || { red "missing tool: $tool"; exit 1; }
 done
 
@@ -64,6 +67,10 @@ fi
 # ---------------------------------------------------------------------------
 step "redis: ensure running"
 if ! redis-cli -u "$DSN" ping >/dev/null 2>&1; then
+    command -v redis-server >/dev/null || {
+        red "no Redis reachable at $DSN and no redis-server on PATH to start one"
+        exit 1
+    }
     echo "starting redis-server on 6379"
     redis-server --daemonize yes --port 6379 --save "" --appendonly no
     for _ in $(seq 1 20); do
