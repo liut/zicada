@@ -85,40 +85,11 @@ bash scripts/smoke.sh
 
 Brings up Redis on `:6379` if not running, builds the binary, starts the
 server, runs AE1–AE4 in sequence, and prints `ALL PASS` on success.
+Override the port via `ZICADA_SMOKE_PORT=<port>`. See `AGENTS.md` for
+what each AE covers and the conventions behind the harness.
 
-## Tests
+## Tests, architecture, scope
 
-```bash
-zig build test
-```
-
-Integration tests require a running `redis-server` on `127.0.0.1:6379`;
-they `SkipZigTest` otherwise. **Without Redis on `:6379`, `zig build test`
-exits 0 with all tests skipped** — CI must run a Redis service for the test
-job to mean anything.
-
-## Scope boundaries (v1)
-
-- A records only
-- UDP transport only (TCP listener is deferred)
-- Single Redis instance, single connection per process
-- No TSIG, no prerequisites, no AXFR/IXFR
-
-## Layout
-
-```
-src/
-  main.zig          CLI flag parsing, server-mode orchestration, signal handlers
-  log.zig           Structured logger (pretty in Debug, JSON in Release)
-  config.zig        Flag parsing
-  redis.zig         Minimal RESP client
-  util.zig          IPv4 parse + zone-text A formatter
-  dns/
-    wire.zig        Header, name, question, A answer codec (RFC 1035 + RFC 2136)
-    server.zig      UDP listener, query dispatch
-    update.zig      RFC 2136 UPDATE handler (Redis SET/DEL)
-  http/
-    server.zig      HTTP PUT /api/dns/a handler
-scripts/
-  smoke.sh          End-to-end exerciser (AE1–AE4)
-```
+Contributor and agent docs live in `AGENTS.md` — module layout, scope
+boundaries, the logging split (`log.zig` vs `std.log`), the DNS-join /
+HTTP-detach thread model, and `zig build test` caveats.
