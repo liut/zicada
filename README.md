@@ -39,6 +39,16 @@ Flags: `-name` (host), `-ip` (IPv4), `-ttl` (RR ttl, default 60),
 Listens on UDP `1353` (DNS) and TCP `1354` (HTTP). Responds to `SIGINT`,
 `SIGTERM`, and `SIGHUP` within ~1s.
 
+The HTTP listener binds on `-port + 1`. Pick `-port` with enough headroom
+(the default 1353 leaves 1354 free; running on `-port 53` for a real DNS
+listener needs root or `CAP_NET_BIND_SERVICE`).
+
+Cross-compiling for Linux from macOS:
+
+```bash
+zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast
+```
+
 ### Query (dig)
 
 ```bash
