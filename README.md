@@ -83,7 +83,9 @@ zig build test
 ```
 
 Integration tests require a running `redis-server` on `127.0.0.1:6379`;
-they `SkipZigTest` otherwise.
+they `SkipZigTest` otherwise. **Without Redis on `:6379`, `zig build test`
+exits 0 with all tests skipped** — CI must run a Redis service for the test
+job to mean anything.
 
 ## Scope boundaries (v1)
 
