@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-smoke:
+    name: test / smoke
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install smoke dependencies
+        # redis-tools provides `redis-cli`; ubuntu-latest already has
+        # dig, curl, python3, and netcat.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+
+      - name: Test (unit + Redis-backed integration)
+        # With the Redis service container up, the integration tests in
+        # src/dns/{server,update}.zig and src/http/server.zig connect
+        # against 127.0.0.1:6379 instead of SkipZigTest'ing.
+        run: zig build test --summary all
+
+      - name: Smoke (AE1–AE4 end-to-end)
+        # smoke.sh detects Redis is already running (service container
+        # above) and skips its own --daemonize branch. Runs against the
+        # default port; override with ZICADA_SMOKE_PORT if needed.
+        run: bash scripts/smoke.sh
