@@ -305,6 +305,86 @@ test "integration: PUT /api/dns/a applies batch and returns ok" {
     try std.testing.expectEqualStrings("http-batch-b.example.com. 60 IN A 10.99.0.2", b.?);
 }
 
+test "integration: PUT batch skips malformed records and commits the rest" {
+    // Drives the documented skip-and-continue path: a bad record sitting
+    // between two good ones must not abort the batch, and the response
+    // must still be 200 ok. The bad record's Redis key must NOT appear.
+    var rc = redis.Client.connect(std.testing.io, "redis://127.0.0.1:6379") catch |err| switch (err) {
+        error.AddressUnavailable, error.InvalidDsn => return error.SkipZigTest,
+        else => return err,
+    };
+    defer rc.close();
+    const keys = [_][]const u8{
+        "dns-a-http-batch-skip-1.example.com",
+        "dns-a-http-batch-skip-bad.example.com",
+        "dns-a-http-batch-skip-2.example.com",
+    };
+    inline for (keys) |k| _ = rc.del(k) catch {};
+    defer inline for (keys) |k| { _ = rc.del(k) catch {}; };
+
+    var shutdown: std.atomic.Value(bool) = .init(false);
+    const port: u16 = 13556;
+    const thread = try std.Thread.spawn(.{}, runServer, .{
+        std.testing.io, port - 1, "redis://127.0.0.1:6379", &shutdown,
+    });
+    try Io.Clock.Duration.sleep(.{
+        .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms },
+        .clock = .real,
+    }, std.testing.io);
+    defer {
+        shutdown.store(true, .monotonic);
+        thread.detach();
+    }
+
+    var dst_addr: Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    var dst = dst_addr.connect(std.testing.io, .{ .mode = .stream, .protocol = .tcp }) catch |err| switch (err) {
+        error.ConnectionRefused => return error.SkipZigTest,
+        else => return err,
+    };
+    defer dst.close(std.testing.io);
+
+    // Middle record carries a malformed IPv4 ("not-an-ip"); it's the one
+    // that must be skipped. The two records around it must still commit.
+    const body =
+        \\[{"name":"http-batch-skip-1.example.com","ip":"10.99.1.1"},
+        \\ {"name":"http-batch-skip-bad.example.com","ip":"not-an-ip"},
+        \\ {"name":"http-batch-skip-2.example.com","ip":"10.99.1.2"}]
+    ;
+    var write_buf: [4096]u8 = undefined;
+    var w = dst.writer(std.testing.io, &write_buf);
+    try w.interface.print(
+        "PUT /api/dns/a HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    try w.interface.flush();
+
+    var read_buf: [4096]u8 = undefined;
+    var r = dst.reader(std.testing.io, &read_buf);
+    var response_buf: std.ArrayList(u8) = .empty;
+    defer response_buf.deinit(std.testing.allocator);
+    var chunk: [1024]u8 = undefined;
+    while (true) {
+        const n = try r.interface.readSliceShort(&chunk);
+        if (n == 0) break;
+        try response_buf.appendSlice(std.testing.allocator, chunk[0..n]);
+        if (std.mem.indexOf(u8, response_buf.items, "\r\n\r\n") != null) break;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, response_buf.items, "200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf.items, "ok\n") != null);
+
+    // Good #1 must be present, with the correct zone-text value.
+    const a = try rc.get("dns-a-http-batch-skip-1.example.com");
+    try std.testing.expect(a != null);
+    try std.testing.expectEqualStrings("http-batch-skip-1.example.com. 60 IN A 10.99.1.1", a.?);
+    // Bad record must not have created a key.
+    const bad = try rc.get("dns-a-http-batch-skip-bad.example.com");
+    try std.testing.expect(bad == null);
+    // Good #2 (after the bad one) must also be present.
+    const b = try rc.get("dns-a-http-batch-skip-2.example.com");
+    try std.testing.expect(b != null);
+    try std.testing.expectEqualStrings("http-batch-skip-2.example.com. 60 IN A 10.99.1.2", b.?);
+}
+
 test "integration: GET /api/dns/a returns 204" {
     var shutdown: std.atomic.Value(bool) = .init(false);
     const port: u16 = 13554;
