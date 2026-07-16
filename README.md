@@ -66,12 +66,18 @@ datagram or use the smoke script as a working example
 ### HTTP API
 
 ```bash
-curl -X PUT --data '[{"name":"app.example.com","ip":"10.0.0.1"}]' \
-     http://127.0.0.1:1354/api/dns/a
+curl -X PUT --data '[
+  {"name":"app1.example.com","ip":"10.0.0.1"},
+  {"name":"app2.example.com","ip":"10.0.0.2"},
+  {"name":"app3.example.com","ip":"10.0.0.3"}
+]' http://127.0.0.1:1354/api/dns/a
 # ok
 ```
 
-Batch insert; each entry becomes one Redis key.
+Body is a JSON array; each entry becomes one Redis key. Bad entries
+(skipped/malformed IP, Redis error) are skipped-and-logged, the rest
+still land — there is no transactional guarantee and the response is
+always `ok` for the accepted request.
 
 ## Smoke test
 
