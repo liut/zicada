@@ -39,6 +39,7 @@ const usage =
     \\  -user <name>    service user (default: nobody when root, none otherwise)
     \\  -serv           run as dns server
     \\  -net <proto>    network: udp|tcp (default udp)
+    \\
 ;
 
 const Io = std.Io;
