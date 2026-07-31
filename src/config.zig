@@ -6,6 +6,8 @@ const Defaults = struct {
     const ttl: u32 = 60;
     const days: u32 = 7;
     const serv: bool = false;
+    const gen_service: bool = false;
+    const user: []const u8 = "";
     const net: []const u8 = "udp";
 };
 
@@ -17,12 +19,15 @@ pub const Config = struct {
     ttl: u32,
     days: u32,
     serv: bool,
+    gen_service: bool,
+    user: []u8,
     net: []u8,
 
     pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
         allocator.free(self.dsn);
         allocator.free(self.name);
         allocator.free(self.ip);
+        allocator.free(self.user);
         allocator.free(self.net);
     }
 };
@@ -46,6 +51,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) ParseErro
         .ttl = Defaults.ttl,
         .days = Defaults.days,
         .serv = Defaults.serv,
+        .gen_service = Defaults.gen_service,
+        .user = try allocator.dupe(u8, Defaults.user),
         .net = try allocator.dupe(u8, Defaults.net),
     };
     errdefer cfg.deinit(allocator);
@@ -76,6 +83,19 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) ParseErro
             continue;
         }
 
+        if (std.mem.eql(u8, name, "gen-service")) {
+            if (inline_value) |v| {
+                if (std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1")) {
+                    cfg.gen_service = true;
+                } else if (std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "0")) {
+                    cfg.gen_service = false;
+                } else return error.InvalidValue;
+            } else {
+                cfg.gen_service = true;
+            }
+            continue;
+        }
+
         const value = inline_value orelse blk: {
             if (i + 1 >= args.len) return error.InvalidValue;
             i += 1;
@@ -102,6 +122,9 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) ParseErro
         } else if (std.mem.eql(u8, name, "net")) {
             allocator.free(cfg.net);
             cfg.net = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, name, "user")) {
+            allocator.free(cfg.user);
+            cfg.user = try allocator.dupe(u8, value);
         } else {
             return error.UnknownFlag;
         }
@@ -144,6 +167,33 @@ test "inline -flag=value form" {
     try std.testing.expectEqual(@as(u32, 14), cfg.days);
     try std.testing.expectEqualStrings("tcp", cfg.net);
     try std.testing.expect(cfg.serv);
+}
+
+test "bool -gen-service presence-only" {
+    const a = std.testing.allocator;
+    var cfg = try parse(a, &.{ "zicada", "-gen-service" });
+    defer cfg.deinit(a);
+    try std.testing.expect(cfg.gen_service);
+    try std.testing.expect(!cfg.serv);
+}
+
+test "bool -gen-service=true" {
+    const a = std.testing.allocator;
+    var cfg = try parse(a, &.{ "zicada", "-gen-service=true" });
+    defer cfg.deinit(a);
+    try std.testing.expect(cfg.gen_service);
+}
+
+test "bool -gen-service=false" {
+    const a = std.testing.allocator;
+    var cfg = try parse(a, &.{ "zicada", "-gen-service=false" });
+    defer cfg.deinit(a);
+    try std.testing.expect(!cfg.gen_service);
+}
+
+test "-gen-service with bad value" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.InvalidValue, parse(a, &.{ "zicada", "-gen-service=maybe" }));
 }
 
 test "bool -serv presence-only" {

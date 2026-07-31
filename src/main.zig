@@ -2,6 +2,7 @@ const std = @import("std");
 
 const config = @import("config.zig");
 const redis = @import("redis.zig");
+const service = @import("service.zig");
 const util = @import("util.zig");
 const wire = @import("dns/wire.zig");
 const dns_server = @import("dns/server.zig");
@@ -10,6 +11,7 @@ const log = @import("log.zig");
 comptime {
     _ = config;
     _ = redis;
+    _ = service;
     _ = util;
     _ = wire;
     _ = dns_server;
@@ -23,6 +25,7 @@ const VERSION: []const u8 = "0.1.0";
 const usage =
     \\Usage:
     \\  zicada -name <host> -ip <ipv4> [-ttl <sec>] [-days <n>]
+    \\  zicada -gen-service [-port <n>] [-user <name>]
     \\  zicada -serv [-port <n>] [-dsn <url>] [-net udp|tcp]
     \\
     \\Flags:
@@ -32,6 +35,8 @@ const usage =
     \\  -ip <ipv4>      ip address for cli add
     \\  -ttl <sec>      RR ttl in seconds (default 60)
     \\  -days <n>       redis expire in days (default 7)
+    \\  -gen-service    print systemd service unit to stdout
+    \\  -user <name>    service user (default: nobody when root, none otherwise)
     \\  -serv           run as dns server
     \\  -net <proto>    network: udp|tcp (default udp)
 ;
@@ -81,6 +86,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const want_cli_add = cfg.name.len > 0 and cfg.ip.len > 0;
     if (want_cli_add) return runCliAdd(io, &cfg);
+    if (cfg.gen_service) return runGenService(io, &cfg);
     if (cfg.serv) return runServer(io, &cfg);
 
     var stderr_buffer: [512]u8 = undefined;
@@ -147,12 +153,42 @@ fn runCliAdd(io: Io, cfg: *const config.Config) !u8 {
     return 0;
 }
 
+fn runGenService(io: Io, cfg: *const config.Config) !u8 {
+    const allocator = std.heap.page_allocator;
+
+    const unit = service.genUnit(io, allocator, cfg) catch |err| {
+        var stderr_buffer: [256]u8 = undefined;
+        var stderr_file_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+        const stderr_writer = &stderr_file_writer.interface;
+        try stderr_writer.print("error: failed to generate unit: {s}\n", .{@errorName(err)});
+        try stderr_writer.flush();
+        return 1;
+    };
+    defer allocator.free(unit);
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    const stdout_writer = &stdout_file_writer.interface;
+    try stdout_writer.print("{s}", .{unit});
+    try stdout_writer.flush();
+    return 0;
+}
+
 /// Run DNS (UDP, port) and HTTP (TCP, port+1) servers concurrently. Blocks
 /// until SIGINT/SIGTERM/SIGHUP, then drains the DNS thread (which polls
 /// shutdown via `receiveTimeout`) and detaches the HTTP thread (whose
 /// `listener.accept` is uncancellable). Exits within ~1s of the signal.
 fn runServer(io: Io, cfg: *const config.Config) !u8 {
     installSignalHandlers();
+
+    // ZICADA_DSN env var override for server mode (set by systemd EnvironmentFile)
+    var dsn_override: ?[]const u8 = null;
+    if (std.c.getenv("ZICADA_DSN")) |env_ptr| {
+        const env_dsn = std.mem.span(env_ptr);
+        if (std.mem.eql(u8, cfg.dsn, "redis://localhost:6379/0") and env_dsn.len > 0) {
+            dsn_override = env_dsn;
+        }
+    }
 
     var port_buf: [16]u8 = undefined;
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{cfg.port}) catch "?";
@@ -168,8 +204,9 @@ fn runServer(io: Io, cfg: *const config.Config) !u8 {
     // Per-invocation shutdown flag, passed by pointer to both servers.
     g_shutdown.store(false, .monotonic);
 
+    const dsn = dsn_override orelse cfg.dsn;
     const dns_thread = try std.Thread.spawn(.{}, dns_server.runServer, .{
-        io, cfg.port, cfg.dsn, &g_shutdown,
+        io, cfg.port, dsn, &g_shutdown,
     });
     errdefer {
         g_shutdown.store(true, .monotonic);
@@ -177,7 +214,7 @@ fn runServer(io: Io, cfg: *const config.Config) !u8 {
     }
 
     const http_thread = try std.Thread.spawn(.{}, http_server.runServer, .{
-        io, cfg.port, cfg.dsn, &g_shutdown,
+        io, cfg.port, dsn, &g_shutdown,
     });
     errdefer {
         g_shutdown.store(true, .monotonic);
